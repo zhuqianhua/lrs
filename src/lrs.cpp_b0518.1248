@@ -1,0 +1,181 @@
+#include "lrs.h"
+
+static const char init_header[] = "@HD\tVN:1.5\tSO:unknown\n";
+htsFile *ofl, *onfl;
+bam_hdr_t *header;
+
+template <class T>
+string _itos(T n)
+{
+  stringstream ss;
+  ss << n;
+  return ss.str();
+}
+
+void ibam()
+{
+  samFile *ibam = sam_open(opt.inp.c_str(), "r");
+  header = sam_hdr_read(ibam);
+  // write header
+  if (sam_hdr_write(ofl, header) < 0 || sam_hdr_write(onfl, header) < 0) {
+    cerr << "header writing error: " << endl;
+    exit(-1);
+  }
+  // read bam
+  bam1_t *r = bam_init1();
+  while (sam_read1(ibam, header, r) > 0)
+  {
+    char *r_qname = bam_get_qname(r);
+    uint8_t *r_seq = bam_get_seq(r);
+    uint8_t *r_qual = bam_get_qual(r);
+    seq = "";
+    for (int i = 0; i < r->core.l_qseq; i++)
+      seq += seq_nt16_str[bam_seqi(r_seq, i)];
+    pos.clear();
+    pos.push_back(0); pos.push_back(0); pos.push_back(5); pos.push_back(6);
+    pos.push_back(1); pos.push_back(6); pos.push_back(9); pos.push_back(10);
+
+    for (int i = 0; i <= pos.size() - 4; i += 4) {
+      // write bam
+      bam1_t *n = bam_init1();
+      string qname = r_qname;
+      qname += "_S" + _itos(pos[i+1]) + "_" + _itos(pos[i+2]) + "_A" +  _itos(pos[i+3]);
+      n->core.tid = -1;
+      n->core.pos = -1;
+      n->core.mtid = -1;
+      n->core.mpos = -1;
+      n->l_data = qname.size() + 1 + (int)(1.5 * (pos[i+2] - pos[i+1] + 1) +((pos[i+2] - pos[i+1] + 1) % 2 != 0)); 
+      if (n->m_data < n->l_data) {
+        n->m_data = n->l_data;
+        kroundup32(n->m_data);
+        n->data = (uint8_t*)realloc(n->data, n->m_data);
+      }
+      n->core.flag = BAM_FMUNMAP;
+      n->core.l_qname = qname.size() + 1;
+      n->core.l_qseq = pos[i+2] - pos[i+1] + 1;
+      n->core.n_cigar = 0;
+      memcpy(n->data, (void *)qname.c_str(), qname.size());
+      uint8_t *n_seq = bam_get_seq(n);
+      uint8_t *n_qual = bam_get_qual(n);
+      for (int j = pos[i+1]; j <= pos[i+2]; j ++) {
+        bam_set_seqi(n_seq, j - pos[i+1], bam_seqi(r_seq, j));
+        n_qual[j - pos[i+1]] = r_qual[j];
+      }
+      if (pos[i] == 0)
+        sam_write1(ofl, header, n);
+      else if (pos[i] == 1)
+        sam_write1(onfl, header, n);
+      else 
+        cerr << "unknown type" << endl;
+      bam_destroy1(n);
+    }
+    break;
+  }
+  sam_close(ibam);
+}
+
+int _fasta(string &str)
+{
+  int flag = 0;
+  if (str.find_first_of('>') != string::npos) {
+    int end = str.length();
+    if (str.find_first_of(' ') != string::npos)
+      end = str.find_first_of(' ');
+    str = str.substr(str.find_first_of('>') + 1, end - str.find_first_of('>') - 1);
+    return 0;
+  } else {
+    transform(str.begin(), str.end(), str.begin(), ::toupper);
+    return 1;
+  }
+}
+
+void _fas(string &nam)
+{
+  pos.clear(); 
+  _segm();
+  for (int i = 0; i <= pos.size() - 4; i += 4) {
+    // write bam
+    bam1_t *n = bam_init1();
+    string qname = nam;
+    qname += "_S" + _itos(pos[i+1]) + "_" + _itos(pos[i+2]) + "_A" +  _itos(pos[i+3]);
+    n->core.tid = -1;
+    n->core.pos = -1;
+    n->core.mtid = -1;
+    n->core.mpos = -1;
+    n->l_data = qname.size() + 1 + (int)(1.5 * (pos[i+2] - pos[i+1] + 1) +((pos[i+2] - pos[i+1] + 1) % 2 != 0));
+    if (n->m_data < n->l_data) {
+      n->m_data = n->l_data;
+      kroundup32(n->m_data);
+      n->data = (uint8_t*)realloc(n->data, n->m_data);
+    }
+    n->core.flag = BAM_FMUNMAP;
+    n->core.l_qname = qname.size() + 1;
+    n->core.l_qseq = pos[i+2] - pos[i+1] + 1;
+    n->core.n_cigar = 0;
+    memcpy(n->data, (void *)qname.c_str(), qname.size());
+    uint8_t *n_seq = bam_get_seq(n);
+    uint8_t *n_qual = bam_get_qual(n);
+    for (int j = pos[i+1]; j <= pos[i+2]; j ++) {
+      bam_set_seqi(n_seq, j - pos[i+1], seq_nt16_table[seq[j]]);
+      n_qual[j - pos[i+1]] = 72;
+    }
+    if (pos[i] == 0) {
+      sam_write1(ofl, header, n);
+    } else if (pos[i] == 1)
+      sam_write1(onfl, header, n);
+    else
+      cerr << "unknown type" << endl;
+    bam_destroy1(n);
+  }
+}
+
+void ifasta()
+{
+  //write header
+  header = bam_hdr_init();
+  header->l_text = strlen(init_header);
+  header->text = strdup(init_header);
+  header->n_targets = 0;
+  if (sam_hdr_write(ofl, header) < 0 || sam_hdr_write(onfl, header) < 0) {
+    cerr << "header writing error: " << endl;
+    exit(-1);
+  } 
+
+  ifstream ifs(opt.inp.c_str());
+  string str(""), nam("");
+  while (!ifs.eof())
+  {
+    getline(ifs, str);
+    int flag = _fasta(str);
+    if (flag == 0) {
+      if (nam.compare("") != 0)
+        _fas(nam);
+      nam = str;
+      seq = "";
+    } else {
+      seq += str;
+    }
+  }
+  ifs.close();
+  _fas(nam);
+}
+
+int main(int argc, char* argv[])
+{
+  _getopt(argc, argv);
+  string fl = opt.out + "_fl.bam", nfl = opt.out + "_nfl.bam";
+  ofl = hts_open(fl.c_str(), "wb");
+  onfl = hts_open(nfl.c_str(), "wb");
+  if (opt.fmt.compare("b") == 0)
+    ibam();
+  else if (opt.fmt.compare("f") == 0)
+    ifasta();
+  else { 
+    cerr << "illegal parameter for opt.fmt, pls check it" << endl; 
+    exit(-1);
+  }
+  sam_close(ofl);
+  sam_close(onfl);
+  return 0;
+}
+

@@ -1,0 +1,232 @@
+#include "lrs_core.h"
+
+#define link 6
+
+void _loc(string &prm, char typ)
+{
+  Locate tag;
+  int len = 5;
+  for (int i = 0; i < prm.size(); i += 2) { 
+    if (prm.size() - i < len)
+      continue;
+    string anc = prm.substr(i, len);
+    size_t loc = -1;
+    while (1) {
+      loc = seq.find(anc, loc + 1);
+      if (loc == seq.npos)
+        break;
+      tag.beg = loc - i;
+      tag.end = loc + prm.size() - i - 1;
+      if (tag.beg < 0)
+        tag.beg = 0;
+      if (tag.end > seq.length() - 1)
+        tag.end = seq.length() - 1;
+      tag.typ = typ;
+      if (tag.end - tag.beg + 1 >= prm.size())
+        pis[tag] = ' ';
+    }
+  }
+}
+
+void _locate()
+{
+  loc.clear();
+  string fr = _revc(opt.pm5, 1), tr = _revc(opt.pm3, 1);
+  _loc(opt.pm5, 'F');
+  _loc(fr, 'f');
+  _loc(opt.pm3, 'T');
+  _loc(tr, 't');
+  int i = 0;
+  for (map<Locate, char>::iterator im = pis.begin(); im != pis.end(); im++) {
+    loc[i % opt.thd].push_back(im->first);
+    i ++;
+  }
+  pis.clear();
+}
+
+void *_segmentation(void *thread) 
+{
+  int THD = *(int *) thread;
+  if (loc.find(THD) == loc.end())
+    return 0;
+  for (vector<Locate>::iterator iv = loc[THD].begin(); iv != loc[THD].end(); iv++) {
+    string _read = seq.substr(iv->beg, iv->end - iv->beg + 1);
+    int32_t mask = _read.size() / 2;
+    // Declares a default Aligner
+    StripedSmithWaterman::Aligner aligner;
+    // Declares a default filter
+    StripedSmithWaterman::Filter filter;
+    // Declares an alignment that stores the result
+    StripedSmithWaterman::Alignment align;
+    string _primer;
+    int tail = 0, tbeg = 0, tend;
+    if (iv->typ == 'F') {
+      _primer = opt.pm5;
+      tbeg = iv->end - 5;
+      tend = iv->end;
+    } else if (iv->typ == 'T') {
+      _primer = opt.pm3;
+      tbeg = iv->end + 1;
+      tend = iv->end + 5;
+      if (tend >= seq.size())
+        tend = seq.size() - 1;
+    } else if (iv->typ == 'f') {
+      _primer = _revc(opt.pm5, 1);
+      tbeg = iv->beg;
+      tend = iv->beg + 5;
+    } else if (iv->typ == 't') {
+      _primer = _revc(opt.pm3, 1);
+      tbeg = iv->beg - 5;
+      tend = iv->beg;
+      if (tbeg < 0)
+        tbeg = 0;
+    } else {
+      cerr << "illegal primer type" << endl;
+      exit(-1);
+    }
+    for (int t = tbeg; t <= tend; t ++) 
+      if (seq[t] == 'G' && (iv->typ == 'F' || iv->typ == 'T'))
+        tail ++;
+      else if (seq[t] == 'C' && (iv->typ == 'f' || iv->typ == 't'))
+        tail ++;
+    aligner.Align(_read.c_str(), _primer.c_str(), _primer.size(), filter, &align, mask);
+    string dgt;
+    int match = 0, clip = 0;
+    for (int i = 0; i < align.cigar_string.size(); i++) {
+      if (isdigit(align.cigar_string[i]))
+        dgt += align.cigar_string[i];
+      else {
+        if (align.cigar_string[i] == '=')
+          match += atoi(dgt.c_str());
+        dgt = "";
+      }
+    }
+    if (match < opt.len)
+      continue;
+    if (opt.gtail==true && ((iv->typ == 'F' || iv->typ == 'f') && tail < 3) || ((iv->typ == 'T' || iv->typ == 't') && tail >= 3))
+      continue;
+    pthread_mutex_lock(&mutex);
+    if (anc.find(align.ref_begin + iv->beg) == anc.end())
+      anc[align.ref_begin + iv->beg] = iv->typ;    
+    pthread_mutex_unlock(&mutex);
+  }
+}
+
+void _adjust()
+{
+  /* anc pos_type: 0-start, F f T t  
+  pos: fl_nfl,begin,end,reverse_complementary */
+  int BEG = 0;
+  for (map<int, char>::iterator it = anc.begin(); it != anc.end(); it ++) {
+    map<int, char>::iterator in = it;
+    in ++;
+    int typ, beg, end, rev; 
+    switch(it->second) {
+      case 'F':
+        beg = it->first + opt.pm5.size();
+        rev = 0;
+        if (in == anc.end()) {
+          typ = 1;
+          end = seq.size() - 1;
+        } else {
+          if (in->second == 't' || in->second == 'T')
+            BEG = in->first + opt.pm3.size();
+          else 
+            BEG = in->first + opt.pm5.size();		  
+  		  if (in->first - it->first - opt.pm5.size() > link) {
+            end = in->first - 1;		
+            if (in->second == 't') {
+              typ = 0;		
+              it ++;
+            } else if (in->second == 'f') {
+              typ = 1;
+              it ++;
+            } else if (in->second == 'F') {
+              typ = 1;
+            } else {
+              typ = 2;
+            }
+          } else {
+            end = -1;
+          }
+        }
+        break;
+      case 'f':
+        if (it->first - BEG > opt.pm5.size()) {
+          beg = BEG;
+          end = it->first - 1;
+          typ = 1;
+          rev = 1;
+        }
+        BEG = it->first + opt.pm5.size();
+        break;
+      case 'T':
+        beg = it->first + opt.pm3.size();
+        rev = 1;
+        if (in == anc.end()) {
+          end = seq.size() - 1;
+          typ = 2;
+        } else {
+          if (in->second == 't' || in->second == 'T')
+            BEG = in->first + opt.pm3.size();
+          else
+            BEG = in->first + opt.pm5.size();
+          if (in->first - it->first > opt.pm3.size()) {
+            end = in->first - 1;
+            if (in->second == 'f') {
+              typ = 0;
+              it ++;
+            } else if (in->second == 'F') {
+              typ = 3;
+            } else if (in->second == 'T' || in->second == 't') {
+              typ = 2;
+            }
+          }
+        }
+        break;
+      case 't':
+        if (it->first - BEG > link) {
+          beg = BEG;
+          end = it->first - 1;
+          typ = 2;
+          rev = 0;
+        }
+        BEG = it->first + opt.pm3.size();
+        break;
+    }
+    if (end - beg < link) 
+      continue;
+    pos.push_back(typ);
+    pos.push_back(beg);
+    pos.push_back(end); 
+    pos.push_back(rev);
+  }
+  anc.clear();
+}
+
+void _segm()
+{
+  _locate();
+  int THREAD[opt.thd];
+  pthread_t thread[opt.thd];
+  for (int i = 0; i < opt.thd; i++) {
+    THREAD[i] = i;
+    int res = pthread_create(&thread[i], NULL, _segmentation, (void *) &THREAD[i]);
+    if (res != 0) {
+      printf("Thread create %d failed\n", i);
+      exit(-1);
+    }
+  }
+  while (1)
+  {
+    int mak = 0;
+    void *status;
+    for (int i = 0; i < opt.thd; i++)
+      if (pthread_join(thread[i], &status) != 0)
+        mak ++;
+    if (mak == 0)
+      break;
+  }
+  loc.clear();
+  _adjust();
+}
